@@ -1,0 +1,903 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Hand Tracking Panel - 2 Hands 4 Fingers</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #1a1a1a;
+            overflow: hidden;
+            height: 100vh;
+            width: 100vw;
+            user-select: none;
+            -webkit-user-select: none;
+            touch-action: none;
+            position: fixed;
+        }
+
+        #container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        #video {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1);
+            opacity: 0;
+        }
+
+        #output {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            transform: scaleX(-1);
+            touch-action: none;
+        }
+
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            color: white;
+            z-index: 100;
+            background: rgba(0,0,0,0.8);
+            padding: 30px;
+            border-radius: 15px;
+        }
+
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 5px solid rgba(255, 255, 255, 0.3);
+            border-top-color: #4CAF50;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        #controls {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 10px 20px;
+            border-radius: 30px;
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            z-index: 50;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+
+        button {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+            transition: all 0.3s;
+            white-space: nowrap;
+            min-width: 80px;
+        }
+
+        button:hover {
+            background: #45a049;
+            transform: translateY(-2px);
+        }
+
+        button:active {
+            transform: translateY(0);
+            background: #3d8b40;
+        }
+
+        #fps {
+            color: white;
+            padding: 12px 20px;
+            font-family: monospace;
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            background: rgba(255,255,255,0.1);
+            border-radius: 25px;
+            min-width: 80px;
+            justify-content: center;
+        }
+
+        #status {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 12px;
+            z-index: 50;
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+        }
+
+        @media (max-width: 600px) {
+            button {
+                padding: 10px 15px;
+                font-size: 12px;
+                min-width: 60px;
+            }
+            
+            #controls {
+                gap: 5px;
+                padding: 8px 15px;
+                bottom: 10px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <video id="video" autoplay playsinline></video>
+        <canvas id="output"></canvas>
+        <div id="loading">
+            <div class="spinner"></div>
+            <p>Loading Hand Tracking...</p>
+            <p style="font-size:12px; margin-top:10px; opacity:0.7;">Show 2 hands with index+thumb</p>
+        </div>
+        <div id="status">Ready - Show hands</div>
+    </div>
+    
+    <div id="controls">
+        <button id="toggleCamera">📷 Camera</button>
+        <button id="resetPanel">🔄 Reset</button>
+        <span id="fps">FPS: 0</span>
+    </div>
+
+    <!-- MediaPipe Scripts -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1640029074/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js" crossorigin="anonymous"></script>
+
+    <script>
+        // ============ HAND TRACKING SYSTEM - SINGLE FILE VERSION ============
+        
+        class HandTrackingPanel {
+            constructor() {
+                // DOM elements
+                this.video = document.getElementById('video');
+                this.canvas = document.getElementById('output');
+                this.ctx = this.canvas.getContext('2d');
+                this.loadingEl = document.getElementById('loading');
+                this.statusEl = document.getElementById('status');
+                this.fpsEl = document.getElementById('fps');
+                
+                // Panel state with smoothing
+                this.panel = {
+                    x: 0,
+                    y: 0,
+                    width: 300,
+                    height: 200,
+                    rotation: 0,
+                    scale: 1,
+                    isActive: false,
+                    lastUpdate: 0,
+                    smoothingFactor: 0.75,
+                    // Velocities for smoother movement
+                    vx: 0,
+                    vy: 0,
+                    vw: 0,
+                    vh: 0,
+                    vr: 0
+                };
+                
+                this.targetPanel = {
+                    x: 0,
+                    y: 0,
+                    width: 300,
+                    height: 200,
+                    rotation: 0,
+                    scale: 1
+                };
+                
+                // Tracking state
+                this.hands = null;
+                this.camera = null;
+                this.isCameraActive = true;
+                this.touchPoints = [];
+                this.handsDetected = 0;
+                
+                // FPS counter
+                this.fpsCounter = {
+                    frames: 0,
+                    lastTime: performance.now(),
+                    fps: 0
+                };
+                
+                // Panel overlay (grid pattern)
+                this.panelImage = null;
+                this.overlayCanvas = null;
+                
+                // Performance optimization
+                this.lastProcessTime = 0;
+                this.processInterval = 1000 / 60; // 60 FPS max
+                
+                // Bind methods
+                this.onResults = this.onResults.bind(this);
+                this.update = this.update.bind(this);
+                this.gameLoop = this.gameLoop.bind(this);
+                
+                // Initialize
+                this.createPanelOverlay();
+                this.initHandTracking();
+                this.setupEventListeners();
+                this.resizeCanvas();
+                this.resetPanel();
+            }
+            
+            createPanelOverlay() {
+                // Create canvas for grid pattern
+                this.overlayCanvas = document.createElement('canvas');
+                this.overlayCanvas.width = 600;
+                this.overlayCanvas.height = 400;
+                const ctx = this.overlayCanvas.getContext('2d');
+                
+                // Background with gradient
+                const gradient = ctx.createLinearGradient(0, 0, 600, 400);
+                gradient.addColorStop(0, 'rgba(30, 60, 114, 0.3)');
+                gradient.addColorStop(1, 'rgba(60, 30, 114, 0.3)');
+                ctx.fillStyle = gradient;
+                ctx.fillRect(0, 0, 600, 400);
+                
+                // Main border
+                ctx.strokeStyle = 'rgba(100, 200, 255, 0.9)';
+                ctx.lineWidth = 4;
+                ctx.shadowColor = 'rgba(0, 150, 255, 0.5)';
+                ctx.shadowBlur = 15;
+                ctx.strokeRect(3, 3, 594, 394);
+                ctx.shadowBlur = 0;
+                
+                // Inner border
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(8, 8, 584, 384);
+                
+                // Grid lines
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+                ctx.lineWidth = 0.5;
+                ctx.setLineDash([5, 5]);
+                
+                // Vertical lines
+                for (let x = 0; x <= 600; x += 50) {
+                    ctx.beginPath();
+                    ctx.moveTo(x, 0);
+                    ctx.lineTo(x, 400);
+                    ctx.stroke();
+                }
+                
+                // Horizontal lines
+                for (let y = 0; y <= 400; y += 50) {
+                    ctx.beginPath();
+                    ctx.moveTo(0, y);
+                    ctx.lineTo(600, y);
+                    ctx.stroke();
+                }
+                
+                ctx.setLineDash([]);
+                
+                // Corner handles
+                const handleSize = 20;
+                const corners = [
+                    [5, 5],
+                    [575, 5],
+                    [5, 375],
+                    [575, 375]
+                ];
+                
+                corners.forEach(([x, y]) => {
+                    // Handle background
+                    ctx.fillStyle = 'rgba(0, 200, 255, 0.9)';
+                    ctx.fillRect(x, y, handleSize, handleSize);
+                    
+                    // Handle border
+                    ctx.strokeStyle = 'white';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(x, y, handleSize, handleSize);
+                    
+                    // Inner dot
+                    ctx.fillStyle = 'white';
+                    ctx.beginPath();
+                    ctx.arc(x + handleSize/2, y + handleSize/2, 3, 0, Math.PI * 2);
+                    ctx.fill();
+                });
+                
+                // Center crosshair
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(300, 180);
+                ctx.lineTo(300, 220);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(280, 200);
+                ctx.lineTo(320, 200);
+                ctx.stroke();
+                
+                // Convert to image
+                this.panelImage = new Image();
+                this.panelImage.src = this.overlayCanvas.toDataURL();
+            }
+            
+            async initHandTracking() {
+                try {
+                    // Initialize MediaPipe Hands
+                    this.hands = new Hands({
+                        locateFile: (file) => {
+                            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${file}`;
+                        }
+                    });
+                    
+                    await this.hands.setOptions({
+                        maxNumHands: 2,
+                        modelComplexity: 1,
+                        minDetectionConfidence: 0.7,
+                        minTrackingConfidence: 0.5
+                    });
+                    
+                    this.hands.onResults(this.onResults);
+                    
+                    // Start camera
+                    await this.startCamera();
+                    
+                    // Hide loading
+                    this.loadingEl.style.display = 'none';
+                    this.statusEl.textContent = '✅ Ready - Show both hands';
+                    
+                    // Start game loop
+                    this.gameLoop();
+                    
+                } catch (error) {
+                    console.error('Failed to initialize:', error);
+                    this.loadingEl.innerHTML = `
+                        <p style="color: red;">❌ Failed to load</p>
+                        <p style="font-size:12px; margin-top:10px;">
+                            ${error.message || 'Check console for details'}
+                        </p>
+                        <p style="font-size:11px; margin-top:10px; opacity:0.7;">
+                            Make sure to use HTTPS or localhost
+                        </p>
+                    `;
+                }
+            }
+            
+            async startCamera() {
+                if (!this.isCameraActive) return;
+                
+                try {
+                    // Check if we already have a stream
+                    if (this.video.srcObject) {
+                        return;
+                    }
+                    
+                    const stream = await navigator.mediaDevices.getUserMedia({
+                        video: {
+                            width: { ideal: 1280 },
+                            height: { ideal: 720 },
+                            facingMode: 'user',
+                            frameRate: { ideal: 30 }
+                        },
+                        audio: false
+                    });
+                    
+                    this.video.srcObject = stream;
+                    await this.video.play();
+                    
+                    // Initialize Camera utility
+                    this.camera = new Camera(this.video, {
+                        onFrame: async () => {
+                            if (this.hands && this.isCameraActive) {
+                                try {
+                                    await this.hands.send({ image: this.video });
+                                } catch (e) {
+                                    // Silent catch for frame processing errors
+                                }
+                            }
+                        },
+                        width: 1280,
+                        height: 720
+                    });
+                    
+                    await this.camera.start();
+                    
+                } catch (error) {
+                    console.error('Camera error:', error);
+                    this.statusEl.textContent = '❌ Camera access denied';
+                }
+            }
+            
+            stopCamera() {
+                if (this.camera) {
+                    try {
+                        this.camera.stop();
+                    } catch (e) {}
+                    this.camera = null;
+                }
+                
+                if (this.video.srcObject) {
+                    const tracks = this.video.srcObject.getTracks();
+                    tracks.forEach(track => track.stop());
+                    this.video.srcObject = null;
+                }
+            }
+            
+            setupEventListeners() {
+                // Toggle camera
+                document.getElementById('toggleCamera').addEventListener('click', async () => {
+                    this.isCameraActive = !this.isCameraActive;
+                    if (this.isCameraActive) {
+                        await this.startCamera();
+                        document.getElementById('toggleCamera').textContent = '📷 Camera';
+                        document.getElementById('toggleCamera').style.background = '#4CAF50';
+                    } else {
+                        this.stopCamera();
+                        document.getElementById('toggleCamera').textContent = '📷 Start';
+                        document.getElementById('toggleCamera').style.background = '#f44336';
+                    }
+                });
+                
+                // Reset panel
+                document.getElementById('resetPanel').addEventListener('click', () => {
+                    this.resetPanel();
+                });
+                
+                // Handle resize
+                window.addEventListener('resize', () => {
+                    this.resizeCanvas();
+                });
+                
+                // Handle visibility change
+                document.addEventListener('visibilitychange', () => {
+                    if (document.hidden) {
+                        this.stopCamera();
+                    } else if (this.isCameraActive) {
+                        this.startCamera();
+                    }
+                });
+            }
+            
+            resizeCanvas() {
+                this.canvas.width = window.innerWidth;
+                this.canvas.height = window.innerHeight;
+            }
+            
+            resetPanel() {
+                const defaultWidth = Math.min(300, window.innerWidth * 0.4);
+                const defaultHeight = Math.min(200, window.innerHeight * 0.4);
+                
+                this.panel = {
+                    x: window.innerWidth / 2 - defaultWidth / 2,
+                    y: window.innerHeight / 2 - defaultHeight / 2,
+                    width: defaultWidth,
+                    height: defaultHeight,
+                    rotation: 0,
+                    scale: 1,
+                    isActive: false,
+                    lastUpdate: Date.now(),
+                    smoothingFactor: 0.75,
+                    vx: 0, vy: 0, vw: 0, vh: 0, vr: 0
+                };
+                
+                this.targetPanel = {
+                    x: this.panel.x,
+                    y: this.panel.y,
+                    width: defaultWidth,
+                    height: defaultHeight,
+                    rotation: 0,
+                    scale: 1
+                };
+                
+                this.touchPoints = [];
+                this.statusEl.textContent = '🔄 Panel Reset';
+                setTimeout(() => {
+                    this.statusEl.textContent = '✅ Ready - Show both hands';
+                }, 1000);
+            }
+            
+            onResults(results) {
+                // FPS calculation
+                this.fpsCounter.frames++;
+                
+                // Clear canvas
+                this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+                
+                // Process hand landmarks
+                if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                    this.handsDetected = results.multiHandLandmarks.length;
+                    
+                    // Draw landmarks
+                    this.drawHandLandmarks(results.multiHandLandmarks);
+                    
+                    // Process touch points for panel control
+                    if (results.multiHandLandmarks.length >= 2) {
+                        this.processTouchPoints(results.multiHandLandmarks);
+                        this.updatePanelFromTouch();
+                    } else if (results.multiHandLandmarks.length === 1) {
+                        this.statusEl.textContent = '👆 Need 2 hands - Show both hands';
+                        this.touchPoints = [];
+                    }
+                } else {
+                    this.handsDetected = 0;
+                    this.touchPoints = [];
+                    this.statusEl.textContent = '🔍 Looking for hands...';
+                }
+                
+                // Apply smoothing to panel
+                this.smoothPanel();
+                
+                // Draw panel if active
+                if (this.panel.isActive || this.touchPoints.length >= 4) {
+                    this.drawPanel();
+                }
+                
+                // Draw touch point indicators
+                if (this.touchPoints.length > 0) {
+                    this.drawTouchPointIndicators();
+                }
+            }
+            
+            drawHandLandmarks(landmarksArray) {
+                landmarksArray.forEach((landmarks, handIndex) => {
+                    // Hand connections
+                    const connections = [
+                        [0, 1], [1, 2], [2, 3], [3, 4],
+                        [0, 5], [5, 6], [6, 7], [7, 8],
+                        [5, 9], [9, 10], [10, 11], [11, 12],
+                        [9, 13], [13, 14], [14, 15], [15, 16],
+                        [13, 17], [0, 17],
+                        [17, 18], [18, 19], [19, 20]
+                    ];
+                    
+                    // Color based on hand
+                    const color = handIndex === 0 ? 
+                        'rgba(0, 255, 136, 0.6)' : 
+                        'rgba(255, 136, 0, 0.6)';
+                    
+                    // Draw connections
+                    connections.forEach(([start, end]) => {
+                        if (landmarks[start] && landmarks[end]) {
+                            const startPoint = landmarks[start];
+                            const endPoint = landmarks[end];
+                            
+                            this.ctx.beginPath();
+                            this.ctx.moveTo(
+                                startPoint.x * this.canvas.width,
+                                startPoint.y * this.canvas.height
+                            );
+                            this.ctx.lineTo(
+                                endPoint.x * this.canvas.width,
+                                endPoint.y * this.canvas.height
+                            );
+                            this.ctx.strokeStyle = color;
+                            this.ctx.lineWidth = 2;
+                            this.ctx.stroke();
+                        }
+                    });
+                    
+                    // Draw landmarks
+                    landmarks.forEach((landmark, index) => {
+                        if (landmark) {
+                            const x = landmark.x * this.canvas.width;
+                            const y = landmark.y * this.canvas.height;
+                            
+                            // Fingertips are special
+                            const isFingertip = [4, 8, 12, 16, 20].includes(index);
+                            
+                            this.ctx.beginPath();
+                            this.ctx.arc(x, y, isFingertip ? 8 : 5, 0, 2 * Math.PI);
+                            
+                            if (isFingertip) {
+                                this.ctx.fillStyle = handIndex === 0 ? 
+                                    'rgba(0, 255, 200, 0.9)' : 
+                                    'rgba(255, 200, 0, 0.9)';
+                            } else {
+                                this.ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+                            }
+                            
+                            this.ctx.fill();
+                            this.ctx.strokeStyle = 'rgba(0, 0, 0, 0.5)';
+                            this.ctx.lineWidth = 1;
+                            this.ctx.stroke();
+                            
+                            // Highlight index fingers and thumbs
+                            if ([4, 8].includes(index)) {
+                                this.ctx.beginPath();
+                                this.ctx.arc(x, y, 12, 0, 2 * Math.PI);
+                                this.ctx.strokeStyle = handIndex === 0 ? 
+                                    'rgba(0, 255, 255, 0.5)' : 
+                                    'rgba(255, 255, 0, 0.5)';
+                                this.ctx.lineWidth = 2;
+                                this.ctx.stroke();
+                            }
+                        }
+                    });
+                });
+            }
+            
+            processTouchPoints(landmarksArray) {
+                if (landmarksArray.length < 2) return;
+                
+                const hand1 = landmarksArray[0];
+                const hand2 = landmarksArray[1];
+                
+                // Get 4 finger points: index+thumb from each hand
+                this.touchPoints = [
+                    {
+                        x: hand1[8].x * this.canvas.width,
+                        y: hand1[8].y * this.canvas.height,
+                        id: 'h1_index',
+                        color: '#00ff88'
+                    },
+                    {
+                        x: hand1[4].x * this.canvas.width,
+                        y: hand1[4].y * this.canvas.height,
+                        id: 'h1_thumb',
+                        color: '#00ff88'
+                    },
+                    {
+                        x: hand2[8].x * this.canvas.width,
+                        y: hand2[8].y * this.canvas.height,
+                        id: 'h2_index',
+                        color: '#ff8800'
+                    },
+                    {
+                        x: hand2[4].x * this.canvas.width,
+                        y: hand2[4].y * this.canvas.height,
+                        id: 'h2_thumb',
+                        color: '#ff8800'
+                    }
+                ];
+                
+                this.panel.isActive = true;
+                this.statusEl.textContent = '✋ Panel Active - 2 hands detected';
+            }
+            
+            updatePanelFromTouch() {
+                if (this.touchPoints.length < 4) return;
+                
+                const [p1, p2, p3, p4] = this.touchPoints;
+                
+                // Calculate center of all 4 points
+                const centerX = (p1.x + p2.x + p3.x + p4.x) / 4;
+                const centerY = (p1.y + p2.y + p3.y + p4.y) / 4;
+                
+                // Calculate diagonals for scale
+                const d1 = Math.hypot(p1.x - p4.x, p1.y - p4.y);
+                const d2 = Math.hypot(p2.x - p3.x, p2.y - p3.y);
+                const avgDiagonal = (d1 + d2) / 2;
+                
+                // Base diagonal for default panel size
+                const baseDiagonal = Math.hypot(300, 200);
+                const scale = Math.max(0.3, Math.min(3.0, avgDiagonal / baseDiagonal));
+                
+                // Calculate rotation from first hand's fingers
+                const angle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+                
+                // Calculate panel dimensions
+                const panelWidth = 300 * scale;
+                const panelHeight = 200 * scale;
+                
+                // Update target panel
+                this.targetPanel = {
+                    x: centerX - panelWidth / 2,
+                    y: centerY - panelHeight / 2,
+                    width: panelWidth,
+                    height: panelHeight,
+                    rotation: angle,
+                    scale: scale
+                };
+                
+                this.panel.lastUpdate = Date.now();
+            }
+            
+            smoothPanel() {
+                const factor = this.panel.smoothingFactor;
+                const springForce = 0.3;
+                const damping = 0.8;
+                
+                // Spring physics for smoother movement
+                const dx = this.targetPanel.x - this.panel.x;
+                const dy = this.targetPanel.y - this.panel.y;
+                const dw = this.targetPanel.width - this.panel.width;
+                const dh = this.targetPanel.height - this.panel.height;
+                
+                // Rotation smoothing (handle angle wrapping)
+                let dr = this.targetPanel.rotation - this.panel.rotation;
+                while (dr > Math.PI) dr -= Math.PI * 2;
+                while (dr < -Math.PI) dr += Math.PI * 2;
+                
+                // Update velocities
+                this.panel.vx += dx * springForce;
+                this.panel.vy += dy * springForce;
+                this.panel.vw += dw * springForce;
+                this.panel.vh += dh * springForce;
+                this.panel.vr += dr * springForce;
+                
+                // Apply damping
+                this.panel.vx *= damping;
+                this.panel.vy *= damping;
+                this.panel.vw *= damping;
+                this.panel.vh *= damping;
+                this.panel.vr *= damping;
+                
+                // Update positions
+                this.panel.x += this.panel.vx;
+                this.panel.y += this.panel.vy;
+                this.panel.width += this.panel.vw;
+                this.panel.height += this.panel.vh;
+                this.panel.rotation += this.panel.vr;
+                
+                // Direct smoothing as fallback for large differences
+                if (Math.abs(dx) > 100 || Math.abs(dy) > 100) {
+                    this.panel.x += dx * (1 - factor);
+                    this.panel.y += dy * (1 - factor);
+                }
+                
+                this.panel.scale = this.targetPanel.scale;
+            }
+            
+            drawPanel() {
+                const { x, y, width, height, rotation } = this.panel;
+                
+                this.ctx.save();
+                
+                // Translate to center, rotate, translate back
+                const centerX = x + width / 2;
+                const centerY = y + height / 2;
+                
+                this.ctx.translate(centerX, centerY);
+                this.ctx.rotate(rotation);
+                this.ctx.translate(-centerX, -centerY);
+                
+                // Draw shadow
+                this.ctx.shadowColor = 'rgba(0, 0, 0, 0.6)';
+                this.ctx.shadowBlur = 25;
+                this.ctx.shadowOffsetX = 5;
+                this.ctx.shadowOffsetY = 5;
+                
+                // Draw panel image
+                if (this.panelImage && this.panelImage.complete) {
+                    this.ctx.drawImage(this.panelImage, x, y, width, height);
+                } else {
+                    // Fallback if image not loaded
+                    this.ctx.fillStyle = 'rgba(30, 60, 114, 0.5)';
+                    this.ctx.fillRect(x, y, width, height);
+                    this.ctx.strokeStyle = 'rgba(100, 200, 255, 0.8)';
+                    this.ctx.lineWidth = 3;
+                    this.ctx.strokeRect(x, y, width, height);
+                }
+                
+                // Reset shadow
+                this.ctx.shadowColor = 'transparent';
+                this.ctx.shadowBlur = 0;
+                this.ctx.shadowOffsetX = 0;
+                this.ctx.shadowOffsetY = 0;
+                
+                // Draw corner handles
+                const handleSize = Math.min(20, width * 0.1);
+                const corners = [
+                    [x, y],
+                    [x + width - handleSize, y],
+                    [x, y + height - handleSize],
+                    [x + width - handleSize, y + height - handleSize]
+                ];
+                
+                corners.forEach(([hx, hy]) => {
+                    this.ctx.fillStyle = 'rgba(0, 255, 255, 0.9)';
+                    this.ctx.fillRect(hx, hy, handleSize, handleSize);
+                    this.ctx.strokeStyle = 'white';
+                    this.ctx.lineWidth = 2;
+                    this.ctx.strokeRect(hx, hy, handleSize, handleSize);
+                });
+                
+                this.ctx.restore();
+            }
+            
+            drawTouchPointIndicators() {
+                this.touchPoints.forEach(point => {
+                    this.ctx.beginPath();
+                    this.ctx.arc(point.x, point.y, 8, 0, 2 * Math.PI);
+                    this.ctx.fillStyle = point.color || 'rgba(255, 255, 0, 0.8)';
+                    this.ctx.fill();
+                    this.ctx.strokeStyle = 'white';
+                    this.ctx.lineWidth = 2;
+                    this.ctx.stroke();
+                    
+                    // Glow effect
+                    this.ctx.beginPath();
+                    this.ctx.arc(point.x, point.y, 12, 0, 2 * Math.PI);
+                    this.ctx.strokeStyle = point.color || 'rgba(255, 255, 0, 0.3)';
+                    this.ctx.lineWidth = 3;
+                    this.ctx.stroke();
+                });
+            }
+            
+            gameLoop(timestamp) {
+                if (!timestamp) timestamp = performance.now();
+                
+                // Update FPS counter
+                if (timestamp - this.fpsCounter.lastTime >= 1000) {
+                    this.fpsCounter.fps = this.fpsCounter.frames;
+                    this.fpsCounter.frames = 0;
+                    this.fpsCounter.lastTime = timestamp;
+                    this.fpsEl.textContent = `FPS: ${this.fpsCounter.fps}`;
+                }
+                
+                // Auto-reset panel if no touch for 2 seconds
+                if (this.panel.lastUpdate && 
+                    timestamp - this.panel.lastUpdate > 2000 && 
+                    this.panel.isActive) {
+                    this.panel.isActive = false;
+                    this.statusEl.textContent = '🔍 Looking for hands...';
+                }
+                
+                // Continue game loop
+                if (this.isCameraActive || this.panel.isActive) {
+                    requestAnimationFrame(this.gameLoop);
+                }
+            }
+            
+            update() {
+                // Legacy update method
+                if (this.isCameraActive) {
+                    requestAnimationFrame(this.update);
+                }
+            }
+        }
+        
+        // Initialize when page loads
+        window.addEventListener('DOMContentLoaded', () => {
+            // Small delay to ensure DOM is ready
+            setTimeout(() => {
+                try {
+                    const app = new HandTrackingPanel();
+                    
+                    // Store reference globally for debugging
+                    window.handTrackingApp = app;
+                    
+                } catch (error) {
+                    console.error('Failed to initialize app:', error);
+                    document.getElementById('loading').innerHTML = `
+                        <p style="color: red;">❌ Error initializing</p>
+                        <p style="font-size:12px; margin-top:10px;">${error.message}</p>
+                    `;
+                }
+            }, 100);
+        });
+        
+        // Handle errors globally
+        window.addEventListener('error', (event) => {
+            console.error('Global error:', event.error);
+        });
+    </script>
+</body>
+</html>
